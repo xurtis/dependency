@@ -11,9 +11,12 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use queue::Task;
 
 /// A target in the dependency graph
-pub trait Target {
+pub trait Target<E> {
     /// Get the status of the data
     fn status(&self) -> Status;
+
+    /// Regenerate the data
+    fn regenerate(&mut self) -> ::std::result::Result<(), E>;
 }
 
 /// The status for the data of a target
@@ -37,7 +40,7 @@ impl<T, E> Clone for Node<T, E> {
     }
 }
 
-impl<T: Target + 'static, E: 'static> Node<T, E> {
+impl<T: Target<E> + 'static, E: 'static> Node<T, E> {
     /// Create a new dependency with an initial value
     pub fn new(value: T) -> NodeBuilder<T, E> {
         NodeBuilder {
@@ -55,7 +58,7 @@ impl<T: Target + 'static, E: 'static> Node<T, E> {
     }
 }
 
-impl<T, E> Task<E> for Node<T, E> {
+impl<T: Target<E>, E> Task<E> for Node<T, E> {
     fn dependencies(&self) -> Result<Vec<Box<dyn Task<E>>>, E> {
         let node = self.lock.read()?;
         let mut dependencies = Vec::with_capacity(node.dependencies.len());
@@ -70,7 +73,8 @@ impl<T, E> Task<E> for Node<T, E> {
     }
 
     fn process(&mut self) -> Result<(), E> {
-        Ok(())
+        let mut node = self.lock.write()?;
+        node.value.regenerate().map_err(Error::Transform)
     }
 }
 
@@ -92,7 +96,7 @@ impl<T: 'static, E: 'static> NodeBuilder<T, E> {
     }
 
     /// Add an external dependency
-    pub fn depend<D: Target + 'static>(
+    pub fn depend<D: Target<E> + 'static>(
         mut self,
         dependency: &Node<D, E>,
         consume: impl Fn(&mut T, &D) -> Result<(), E> + 'static,
@@ -158,7 +162,7 @@ where
     E: 'static,
     D: 'static,
     F: 'static,
-    D: Target,
+    D: Target<E>,
     F: Fn(&mut T, &D) -> Result<(), E>,
 {
     fn depend(&self, target: Node<T, E>) -> Box<dyn queue::Task<E>> {
@@ -184,10 +188,13 @@ struct DependencyTask<T, E, D, F> {
 
 impl<T, E, D, F> queue::Task<E> for DependencyTask<T, E, D, F>
 where
+    D: Target<E> + 'static,
+    E: 'static,
     F: Fn(&mut T, &D) -> Result<(), E>,
 {
     fn dependencies(&self) -> Result<Vec<Box<dyn Task<E>>>, E> {
-        self.dependency.dependencies()
+        // Depend on the next target rebuilding itself
+        Ok(vec![Box::new(self.dependency.clone())])
     }
 
     fn process(&mut self) -> Result<(), E> {
