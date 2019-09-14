@@ -37,11 +37,6 @@ impl<T, E> Clone for Node<T, E> {
     }
 }
 
-pub struct NodeBuilder<T, E> {
-    value: T,
-    dependencies: Vec<Box<dyn Depend<T, E>>>,
-}
-
 impl<T: Target + 'static, E: 'static> Node<T, E> {
     /// Create a new dependency with an initial value
     pub fn new(value: T) -> NodeBuilder<T, E> {
@@ -51,12 +46,41 @@ impl<T: Target + 'static, E: 'static> Node<T, E> {
         }
     }
 
+    /// Resolve the node and all of its dependencies
     pub fn resolve(&self) -> Result<NodeRef<T, E>, E> {
         use queue::Resolve;
         let task = self.clone();
         Resolve::resolve(task)?;
         NodeRef::try_from_node(self)
     }
+}
+
+impl<T, E> Task<E> for Node<T, E> {
+    fn dependencies(&self) -> Result<Vec<Box<dyn Task<E>>>, E> {
+        let node = self.lock.read()?;
+        let mut dependencies = Vec::with_capacity(node.dependencies.len());
+
+        for dependency in &node.dependencies {
+            if let Status::Pending = dependency.status()? {
+                dependencies.push(dependency.depend(self.clone()));
+            }
+        }
+
+        Ok(dependencies)
+    }
+
+    fn process(&mut self) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+/// Builder used to add dependencies to a node
+///
+/// A node can only have dependencies added before it is completed and can be only added as a
+/// dependency of other nodes after it has been fully built.
+pub struct NodeBuilder<T, E> {
+    value: T,
+    dependencies: Vec<Box<dyn Depend<T, E>>>,
 }
 
 impl<T: 'static, E: 'static> NodeBuilder<T, E> {
@@ -79,23 +103,7 @@ impl<T: 'static, E: 'static> NodeBuilder<T, E> {
     }
 }
 
-impl<T, E> Task<E> for Node<T, E> {
-    fn dependencies(&self) -> Result<Vec<Box<dyn Task<E>>>, E> {
-        let node = self.lock.read()?;
-        let mut dependencies = Vec::with_capacity(node.dependencies.len());
-
-        for dependency in &node.dependencies {
-            dependencies.push(dependency.depend(self.clone()));
-        }
-
-        Ok(dependencies)
-    }
-
-    fn process(&mut self) -> Result<(), E> {
-        Ok(())
-    }
-}
-
+/// A reference to the inner value of a node through all locking mechanisms
 pub struct NodeRef<'t, T, E> {
     node: RwLockReadGuard<'t, NodeBuilder<T, E>>,
 }
@@ -140,6 +148,8 @@ where
 /// Resolve a dependency and apply it to the dependant node
 trait Depend<T, E> {
     fn depend(&self, target: Node<T, E>) -> Box<dyn queue::Task<E>>;
+
+    fn status(&self) -> Result<Status, E>;
 }
 
 impl<T, E, D, F> Depend<T, E> for Dependency<T, E, D, F>
@@ -148,6 +158,7 @@ where
     E: 'static,
     D: 'static,
     F: 'static,
+    D: Target,
     F: Fn(&mut T, &D) -> Result<(), E>,
 {
     fn depend(&self, target: Node<T, E>) -> Box<dyn queue::Task<E>> {
@@ -157,6 +168,10 @@ where
             apply: self.apply.clone(),
         };
         Box::new(task)
+    }
+
+    fn status(&self) -> Result<Status, E> {
+        Ok(self.dependency.lock.read()?.value.status())
     }
 }
 
